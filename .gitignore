@@ -8,3 +8,17 @@
 .agents/skills/
 .claude/skills/
 .pi/skills/
+
+# Pi Rules extension allowlist
+/agent/**
+!/agent/extensions/
+!/agent/extensions/personal/
+!/agent/extensions/personal/index.ts
+!/agent/extensions/personal/pi-rules/
+!/agent/extensions/personal/pi-rules/index.ts
+!/agent/extensions/personal/pi-rules/discovery.ts
+!/agent/extensions/personal/pi-rules/matching.ts
+!/agent/extensions/personal/pi-rules/pi-rules.test.ts
+!/agent/extensions/personal/pi-rules/package.json
+/specs/**
+!/specs/pi-rules.md
