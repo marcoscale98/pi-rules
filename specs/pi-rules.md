@@ -65,13 +65,13 @@ The first version will deliberately avoid file watching, content revision tracki
 43. As a Pi user, I want the path shown whenever any Rule activates, including startup OS/model Rules, so that I know exactly which instructions entered the context.
 44. As a Pi user, I want `/reload` to refresh discovery without diffing previously activated content, so that the first version stays simple.
 45. As a Pi user, I accept that an already activated Rule is not updated or revoked within the same compaction epoch, so that revision and tombstone machinery is unnecessary.
-46. As a Pi user, I want tests that run without adding a project-wide package manifest or test framework, so that the personal configuration repository remains lightweight.
+46. As a Pi user, I want tests that use Node's built-in runner without a third-party test framework, so that the repository remains lightweight while also serving as an installable Pi package.
 47. As a maintainer, I want the test fake checked against Pi's real `ExtensionAPI` type, so that API drift cannot silently leave tests green.
 48. As a repository owner, I want every source, test, and specification file explicitly allowlisted, so that the repository's deny-by-default security policy remains intact.
 
 ## Implementation Decisions
 
-- The feature will be implemented as a personal global Pi extension registered through the existing personal-extension aggregator.
+- The feature will be implemented as an installable Git Pi package using the conventional root `extensions/` directory and a package manifest that declares its entrypoint and runtime dependencies.
 - The extension will be separated into an entrypoint, rule discovery/loading logic, condition matching logic, and tests. This separation exists to keep filesystem concerns distinct from pure matching behavior without introducing speculative abstractions.
 - User-level discovery will include the Pi user Rules directory and Claude's user Rules directory.
 - Project discovery will walk from the current working directory toward the filesystem root and inspect both Pi-native and Claude-compatible Rules directories at every level.
@@ -109,8 +109,8 @@ The first version will deliberately avoid file watching, content revision tracki
 - Tests will assert externally visible extension behavior rather than private helper implementation. The preferred seam is one integration harness around the extension factory.
 - The harness will provide a temporary real filesystem and a fake Pi API/context capable of dispatching lifecycle, model, tool-result, turn-end, and compaction events.
 - The fake API will be declared with TypeScript's `satisfies ExtensionAPI`, not cast from an untyped object, so changes to Pi's extension contract fail typechecking.
-- Automated tests will use Node 26's built-in `node:test` runner and native TypeScript type stripping. No root package manifest, root TypeScript configuration, or third-party test framework will be added.
-- The automated test command will be `node --test agent/extensions/personal/pi-rules/*.test.ts`.
+- Automated tests will use Node 26's built-in `node:test` runner and native TypeScript type stripping. The root package manifest will declare Pi package metadata, runtime dependencies, and the test script; no root TypeScript configuration or third-party test framework will be added.
+- The automated test command will be `node --test extensions/pi-rules/*.test.ts`.
 - Because native type stripping does not typecheck, a separate TypeScript check is mandatory in the current supported setup. It will resolve the globally installed Pi package through `npm root -g`, use bundler-style module resolution, and skip dependency declaration checking while still checking extension and test code.
 - The typecheck command will use `tsc --noEmit`, target modern ECMAScript, set `--baseUrl "$(npm root -g)"`, and include `--skipLibCheck`. The checked fake must continue to satisfy the real installed `ExtensionAPI`.
 - The TypeScript code must stay within syntax that Node's native type stripping can execute directly.
@@ -141,7 +141,7 @@ The first version will deliberately avoid file watching, content revision tracki
 - External symlink containment restrictions beyond project trust.
 - Manual or automated end-to-end and smoke testing with a real Pi process or Herdr. The user may perform such smoke tests separately after this scoped work.
 - Automated calls to real remote models.
-- Publishing the extension as an npm or Git Pi package.
+- Publishing the extension to the npm registry.
 - Publishing this specification to a GitHub issue.
 
 ## Further Notes

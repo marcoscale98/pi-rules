@@ -1,0 +1,31 @@
+{
+  "name": "pi-rules",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Conditional Rules extension for Pi with Claude Code compatibility",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "scripts": {
+    "test": "node --test extensions/pi-rules/*.test.ts"
+  },
+  "dependencies": {
+    "ignore": "7.0.5",
+    "yaml": "2.9.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.1"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi-rules/index.ts"
+    ]
+  }
+}
