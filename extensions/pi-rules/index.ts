@@ -125,7 +125,7 @@ export default function registerPiRules(pi: ExtensionAPI, options: PiRulesOption
 				absolutePath: rule.absolutePath,
 				relativePath: relativeDisplayPath(ctx.cwd, rule.absolutePath),
 			},
-		}, ctx.isIdle() ? undefined : { deliverAs: "steer" });
+		}, ctx.isIdle() ? { triggerTurn: false } : { deliverAs: "steer" });
 		pendingMessages.add(rule.identity);
 		return true;
 	}

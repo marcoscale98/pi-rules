@@ -19,6 +19,7 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 	const sendOptions: any[] = [];
 	const steeringMessages: any[] = [];
 	const nextTurnMessages: any[] = [];
+	const triggeredTurns: any[] = [];
 	let streaming = false;
 	let confirmations = 0;
 
@@ -56,9 +57,11 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 		registerMessageRenderer(type: string, renderer: unknown) {
 			renderers.set(type, renderer);
 		},
+		registerMarkdownTransformer() {},
 		registerEntryRenderer() {},
 		sendMessage(message: any, options?: any) {
 			sendOptions.push(options);
+			if (!streaming && options?.triggerTurn !== false) triggeredTurns.push(message);
 			if (options?.deliverAs === "nextTurn") {
 				nextTurnMessages.push(message);
 			} else if (streaming) {
@@ -101,6 +104,7 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 		entries,
 		sendOptions,
 		nextTurnMessages,
+		triggeredTurns,
 		confirmations,
 		handlers,
 		setStreaming(value: boolean) { streaming = value; },
@@ -139,6 +143,7 @@ test("loads and activates an unconditional user Rule at session startup", async 
 	assert.equal(harness.messages[0].display, true);
 	assert.ok(harness.renderers.has("pi-rules"));
 	assert.equal(harness.notifications.at(-1)?.type, "info");
+	assert.equal(harness.triggeredTurns.length, 0, "an idle Rule activation must append context without starting an LLM turn");
 });
 
 test("discovers trusted project Rules recursively with deterministic precedence and collision-before-condition resolution", async () => {
