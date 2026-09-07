@@ -12,7 +12,7 @@ package-lock.json
 .claude/skills/
 .pi/skills/
 
-# Pi Rules extension allowlist
+# Pi Rules extension ignore rules and exceptions
 /extensions/**
 !/extensions/
 !/extensions/pi-rules/
@@ -22,3 +22,7 @@ package-lock.json
 !/extensions/pi-rules/pi-rules.test.ts
 /specs/**
 !/specs/pi-rules.md
+
+/.github/**
+!/.github/
+!/.github/pull_request_template.md
