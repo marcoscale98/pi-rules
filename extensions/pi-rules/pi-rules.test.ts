@@ -22,6 +22,7 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 	const nextTurnMessages: any[] = [];
 	const triggeredTurns: any[] = [];
 	let streaming = false;
+	let pendingMessages = false;
 	let confirmations = 0;
 
 	const sessionManager = {
@@ -47,6 +48,7 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 		},
 		isProjectTrusted: () => options.trusted ?? false,
 		isIdle: () => !streaming,
+		hasPendingMessages: () => pendingMessages || steeringMessages.length > 0 || nextTurnMessages.length > 0,
 		sessionManager,
 	};
 
@@ -113,6 +115,7 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 		confirmations,
 		handlers,
 		setStreaming(value: boolean) { streaming = value; },
+		setPendingMessages(value: boolean) { pendingMessages = value; },
 		deliverSteering() {
 			while (steeringMessages.length > 0) deliverMessage(steeringMessages.shift());
 		},
@@ -120,7 +123,7 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 }
 
 async function dispatch(harness: ReturnType<typeof createHarness>, event: string, payload: any) {
-	if (event === "tool_result" || event === "turn_end") harness.setStreaming(true);
+	if (event === "agent_start" || event === "tool_result" || event === "turn_end") harness.setStreaming(true);
 	if (event === "model_select") harness.ctx.model = payload.model;
 	for (const handler of harness.handlers[event] ?? []) {
 		const result = await handler(payload, harness.ctx);
@@ -161,6 +164,46 @@ test("loads and activates an unconditional user Rule at session startup", async 
 	assert.match(harness.messages[0].content, /Prefer the editor tool\./);
 	assert.equal(harness.messages[0].display, true);
 	assert.equal(harness.widgets.get("pi-rules"), undefined);
+});
+
+test("commits pending Rules before the first provider call of an extension-started turn", async () => {
+	const homeDir = mkdtempSync(join(tmpdir(), "pi-rules-home-"));
+	const rulesDir = join(homeDir, ".pi", "agent", "rules");
+	mkdirSync(rulesDir, { recursive: true });
+	writeFileSync(join(rulesDir, "always.md"), "---\nmodels: openai/gpt-*\n---\nAlways use the project conventions.");
+
+	const harness = createHarness(homeDir, { model: { provider: "openai", id: "gpt-5" } });
+	registerPiRules(harness.api, { homeDir, platform: "darwin" });
+	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
+	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded .pi/agent/rules/always.md"]);
+
+	await dispatch(harness, "agent_start", { type: "agent_start" });
+	assert.equal(harness.messages.length, 0);
+	harness.deliverSteering();
+
+	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["always.md"]);
+	assert.deepEqual(harness.sendOptions, [{ deliverAs: "steer" }]);
+	assert.equal(harness.triggeredTurns.length, 0);
+	assert.equal(harness.widgets.get("pi-rules"), undefined);
+});
+
+test("commits restored Rules before a queued continuation after threshold compaction", async () => {
+	const homeDir = mkdtempSync(join(tmpdir(), "pi-rules-home-"));
+	const rulesDir = join(homeDir, ".pi", "agent", "rules");
+	mkdirSync(rulesDir, { recursive: true });
+	writeFileSync(join(rulesDir, "always.md"), "Always use the project conventions.");
+
+	const harness = createHarness(homeDir);
+	registerPiRules(harness.api, { homeDir, platform: "darwin" });
+	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
+	harness.setStreaming(true);
+	harness.setPendingMessages(true);
+	await dispatch(harness, "session_compact", { type: "session_compact", willRetry: false });
+
+	assert.equal(harness.messages.length, 0);
+	harness.deliverSteering();
+	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["always.md"]);
+	assert.deepEqual(harness.sendOptions, [{ deliverAs: "steer" }]);
 });
 
 test("keeps model-gated Rules provisional until the submitted prompt", async () => {

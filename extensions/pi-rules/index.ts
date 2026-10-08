@@ -272,7 +272,11 @@ export default function registerPiRules(pi: ExtensionAPI, options: PiRulesOption
 		pending = new Map();
 		await ensureCatalog(ctx);
 		reconcilePending(ctx);
-		if (event.willRetry) flushPending(ctx);
+		if (event.willRetry || ctx.hasPendingMessages()) flushPending(ctx);
+	});
+
+	pi.on("agent_start", async (_event, ctx) => {
+		flushPending(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
