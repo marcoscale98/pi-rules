@@ -18,3 +18,17 @@ Read [README.md](README.md) before changing installation instructions, user-faci
 - `.gitignore` — explicit repository allowlist and generated-file exclusions.
 
 Installed dependencies under `node_modules/` and generated lockfiles are not project source and must remain untracked.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `marcoscale98/pi-rules`. Before tracker operations, read `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the repository label mapping, including `ready-for-planning` for the canonical `ready-for-agent` role. Before triage operations, read `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a single-context layout. Before codebase exploration, read `docs/agents/domain.md`.

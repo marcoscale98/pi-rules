@@ -2,3 +2,10 @@
 .agents/skills/
 .claude/skills/
 .pi/skills/
+
+# Shared local agent tooling
+/.agents/
+/.claude/
+/.pi/
+/.playwright-cli/
+/skills-lock.json
