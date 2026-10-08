@@ -14,6 +14,7 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 	const handlers: HandlerMap = {};
 	const messages: any[] = [];
 	const notifications: Array<{ message: string; type?: string }> = [];
+	const widgets = new Map<string, string[] | undefined>();
 	const renderers = new Map<string, unknown>();
 	const entries: any[] = [];
 	const sendOptions: any[] = [];
@@ -35,6 +36,10 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 			notify(message: string, type?: string) {
 				notifications.push({ message, type });
 			},
+			setWidget(key: string, content: string[] | undefined) {
+				widgets.set(key, content);
+			},
+			setStatus() {},
 			confirm: async () => {
 				confirmations++;
 				return options.confirmTrust ?? true;
@@ -57,7 +62,6 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 		registerMessageRenderer(type: string, renderer: unknown) {
 			renderers.set(type, renderer);
 		},
-		registerMarkdownTransformer() {},
 		registerEntryRenderer() {},
 		sendMessage(message: any, options?: any) {
 			sendOptions.push(options);
@@ -102,6 +106,7 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 		notifications,
 		renderers,
 		entries,
+		widgets,
 		sendOptions,
 		nextTurnMessages,
 		triggeredTurns,
@@ -118,12 +123,19 @@ async function dispatch(harness: ReturnType<typeof createHarness>, event: string
 	if (event === "tool_result" || event === "turn_end") harness.setStreaming(true);
 	if (event === "model_select") harness.ctx.model = payload.model;
 	for (const handler of harness.handlers[event] ?? []) {
-		await handler(payload, harness.ctx);
+		const result = await handler(payload, harness.ctx);
+		const message = (result as { message?: any } | undefined)?.message;
+		if (event === "before_agent_start" && message) deliverHarnessMessage(harness, message);
 	}
 	if (event === "turn_end") {
 		harness.deliverSteering();
 		harness.setStreaming(false);
 	}
+}
+
+function deliverHarnessMessage(harness: ReturnType<typeof createHarness>, message: any): void {
+	harness.messages.push(message);
+	harness.entries.push({ type: "custom_message", customType: message.customType, content: message.content, display: message.display, details: message.details, id: `entry-${harness.entries.length}`, parentId: harness.entries.at(-1)?.id ?? null, timestamp: new Date().toISOString() });
 }
 
 test("loads and activates an unconditional user Rule at session startup", async () => {
@@ -136,14 +148,87 @@ test("loads and activates an unconditional user Rule at session startup", async 
 	registerPiRules(harness.api, { homeDir, platform: "darwin" });
 	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
 
+	assert.equal(harness.messages.length, 0);
+	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded .pi/agent/rules/editor.md"]);
+	assert.ok(harness.renderers.has("pi-rules"));
+	assert.equal(harness.notifications.at(-1)?.type, "info");
+	assert.equal(harness.triggeredTurns.length, 0);
+
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
 	assert.equal(harness.messages.length, 1);
 	assert.match(harness.messages[0].content, /<system-reminder>/);
 	assert.match(harness.messages[0].content, new RegExp(`Contents of ${join(rulesDir, "editor.md")}:`));
 	assert.match(harness.messages[0].content, /Prefer the editor tool\./);
 	assert.equal(harness.messages[0].display, true);
-	assert.ok(harness.renderers.has("pi-rules"));
-	assert.equal(harness.notifications.at(-1)?.type, "info");
-	assert.equal(harness.triggeredTurns.length, 0, "an idle Rule activation must append context without starting an LLM turn");
+	assert.equal(harness.widgets.get("pi-rules"), undefined);
+});
+
+test("keeps model-gated Rules provisional until the submitted prompt", async () => {
+	const homeDir = mkdtempSync(join(tmpdir(), "pi-rules-home-"));
+	const rulesDir = join(homeDir, ".pi", "agent", "rules");
+	mkdirSync(rulesDir, { recursive: true });
+	writeFileSync(join(rulesDir, "codex.md"), "---\nmodels: openai-codex/**\n---\nUse Codex guidance.");
+
+	const harness = createHarness(homeDir, { model: { provider: "openai-codex", id: "gpt-5" } });
+	registerPiRules(harness.api, { homeDir, platform: "darwin" });
+	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
+
+	assert.equal(harness.messages.length, 0);
+	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded .pi/agent/rules/codex.md"]);
+
+	await dispatch(harness, "model_select", { model: { provider: "anthropic", id: "claude-opus" } });
+	assert.equal(harness.messages.length, 0);
+	assert.equal(harness.entries.length, 0);
+	assert.equal(harness.widgets.get("pi-rules"), undefined);
+
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
+	assert.equal(harness.messages.length, 0);
+	assert.equal(harness.entries.length, 0);
+});
+
+test("commits only the currently matching provisional Rules once at prompt submission", async () => {
+	const homeDir = mkdtempSync(join(tmpdir(), "pi-rules-home-"));
+	const rulesDir = join(homeDir, ".pi", "agent", "rules");
+	mkdirSync(rulesDir, { recursive: true });
+	writeFileSync(join(rulesDir, "codex.md"), "---\nmodels: openai-codex/**\n---\nUse Codex guidance.");
+
+	const harness = createHarness(homeDir, { model: { provider: "openai-codex", id: "gpt-5" } });
+	registerPiRules(harness.api, { homeDir, platform: "darwin" });
+	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
+	await dispatch(harness, "model_select", { model: { provider: "anthropic", id: "claude-opus" } });
+	await dispatch(harness, "model_select", { model: { provider: "openai-codex", id: "gpt-5" } });
+
+	assert.equal(harness.messages.length, 0);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
+	assert.equal(harness.messages.length, 1);
+	assert.equal(harness.entries.length, 1);
+	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["codex.md"]);
+	assert.equal(harness.widgets.get("pi-rules"), undefined);
+
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "again" });
+	assert.equal(harness.messages.length, 1);
+});
+
+test("does not withdraw Rules committed before the last assistant message", async () => {
+	const homeDir = mkdtempSync(join(tmpdir(), "pi-rules-home-"));
+	const rulesDir = join(homeDir, ".pi", "agent", "rules");
+	mkdirSync(rulesDir, { recursive: true });
+	writeFileSync(join(rulesDir, "always.md"), "Always keep this guidance.");
+	writeFileSync(join(rulesDir, "codex.md"), "---\nmodels: openai-codex/**\n---\nUse Codex guidance.");
+
+	const harness = createHarness(homeDir, { model: { provider: "anthropic", id: "claude-opus" } });
+	registerPiRules(harness.api, { homeDir, platform: "darwin" });
+	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
+	harness.entries.push({ type: "message", message: { role: "assistant" } });
+
+	await dispatch(harness, "model_select", { model: { provider: "openai-codex", id: "gpt-5" } });
+	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded .pi/agent/rules/codex.md"]);
+	await dispatch(harness, "model_select", { model: { provider: "anthropic", id: "claude-opus" } });
+	assert.equal(harness.widgets.get("pi-rules"), undefined);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "continue" });
+
+	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["always.md"]);
 });
 
 test("discovers trusted project Rules recursively with deterministic precedence and collision-before-condition resolution", async () => {
@@ -165,6 +250,9 @@ test("discovers trusted project Rules recursively with deterministic precedence 
 	registerPiRules(harness.api, { homeDir, platform: "darwin" });
 	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
 
+	assert.equal(harness.messages.length, 0);
+	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded ../.claude/rules/nested/ancestor.md", "Loaded ../../.pi/rules/same.md"]);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
 	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["nested/ancestor.md", "same.md"]);
 	assert.match(harness.messages.find((message) => message.details.identity === "same.md").content, /project wins/);
 	assert.ok(!harness.messages.some((message) => message.content.includes("fallback")));
@@ -193,6 +281,8 @@ test("parses scalar and list conditions, canonicalizes OS/model matches, and str
 	registerPiRules(harness.api, { homeDir, platform: "darwin" });
 	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
 
+	assert.equal(harness.messages.length, 0);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
 	assert.equal(harness.messages.length, 1);
 	assert.match(harness.messages[0].content, /Keep this instruction/);
 	assert.match(harness.messages[0].content, /preserve this code comment/);
@@ -215,12 +305,32 @@ test("activates path Rules only after successful matching reads", async () => {
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: "src/FILE.TS" }, isError: false });
 	await dispatch(harness, "turn_end", { type: "turn_end" });
 	assert.equal(harness.messages.length, 1);
+	assert.equal(harness.widgets.get("pi-rules"), undefined);
 	assert.deepEqual(harness.sendOptions, [{ deliverAs: "steer" }]);
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: "src/deep/file.ts" }, isError: false });
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: "src/failed.ts" }, isError: true });
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "bash", input: { command: "cat src/other.ts" }, isError: false });
 	await dispatch(harness, "turn_end", { type: "turn_end" });
 	assert.equal(harness.messages.length, 1);
+});
+
+test("drops a provisional path Rule when its model stops matching before commit", async () => {
+	const homeDir = mkdtempSync(join(tmpdir(), "pi-rules-home-"));
+	const cwd = join(homeDir, "project");
+	const rulesDir = join(cwd, ".pi", "rules");
+	mkdirSync(rulesDir, { recursive: true });
+	writeFileSync(join(rulesDir, "codex.md"), "---\npaths: '*.ts'\nmodels: openai-codex/**\n---\nUse Codex TypeScript guidance.");
+
+	const harness = createHarness(cwd, { trusted: true, model: { provider: "openai-codex", id: "gpt-5" } });
+	registerPiRules(harness.api, { homeDir, platform: "darwin" });
+	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
+	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: "file.ts" }, isError: false });
+	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded .pi/rules/codex.md"]);
+
+	await dispatch(harness, "model_select", { model: { provider: "anthropic", id: "claude-opus" } });
+	assert.equal(harness.widgets.get("pi-rules"), undefined);
+	await dispatch(harness, "turn_end", { type: "turn_end" });
+	assert.equal(harness.messages.length, 0);
 });
 
 test("matches ignore path semantics across separators, depth, terminal directories, and bases", async () => {
@@ -294,12 +404,15 @@ test("gates project discovery by trust, follows symlinks, and gives Pi-native so
 	const harness = createHarness(cwd, trust);
 	registerPiRules(harness.api, { homeDir, platform: "darwin" });
 	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
-	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["user.md"]);
+	assert.equal(harness.messages.length, 0);
+	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded ../.pi/agent/rules/user.md"]);
 
 	trust.trusted = true;
 	await dispatch(harness, "session_start", { type: "session_start", reason: "reload" });
-	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["user.md", "shared/shared.md"]);
-	assert.match(harness.messages.at(-1).content, /symlinked Pi rule/);
+	assert.equal(harness.messages.length, 0);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
+	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["shared/shared.md", "user.md"]);
+	assert.match(harness.messages.find((message) => message.details.identity === "shared/shared.md").content, /symlinked Pi rule/);
 });
 
 test("derives deduplication from the active branch and compaction epoch", async () => {
@@ -313,6 +426,8 @@ test("derives deduplication from the active branch and compaction epoch", async 
 	const harness = createHarness(cwd, { trusted: true });
 	registerPiRules(harness.api, { homeDir, platform: "darwin" });
 	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
+	assert.equal(harness.messages.length, 0);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
 	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["always.md"]);
 	assert.equal(harness.entries[0]?.type, "custom_message");
 	await dispatch(harness, "session_start", { type: "session_start", reason: "resume" });
@@ -325,7 +440,7 @@ test("derives deduplication from the active branch and compaction epoch", async 
 	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["always.md", "source.md"]);
 
 	harness.entries.push({ type: "compaction", id: `compaction-${harness.entries.length}`, parentId: harness.entries.at(-1)?.id ?? null, timestamp: new Date().toISOString(), summary: "summary", firstKeptEntryId: "first", tokensBefore: 1 });
-	await dispatch(harness, "session_compact", { type: "session_compact" });
+	await dispatch(harness, "session_compact", { type: "session_compact", willRetry: true });
 	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["always.md", "source.md", "always.md"]);
 
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: "src/file.ts" }, isError: false });
@@ -334,8 +449,10 @@ test("derives deduplication from the active branch and compaction epoch", async 
 
 	harness.entries.splice(0, harness.entries.length);
 	await dispatch(harness, "session_tree", { type: "session_tree", newLeafId: "branch", oldLeafId: "old" });
-	assert.equal(harness.messages.length, 5);
+	assert.equal(harness.messages.length, 4);
 	await dispatch(harness, "model_select", { model: { provider: "openai", id: "gpt-5" } });
+	assert.equal(harness.messages.length, 4);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "continue" });
 	assert.equal(harness.messages.length, 5);
 });
 
@@ -357,6 +474,8 @@ test("uses the selected model at read time and restores model-only Rules on mode
 	assert.equal(harness.messages.length, 0);
 
 	await dispatch(harness, "model_select", { model: { provider: "openai", id: "gpt-5-mini" } });
+	assert.equal(harness.messages.length, 0);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
 	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["model-only.md"]);
 
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: "src/file.ts" }, isError: false });
@@ -390,15 +509,20 @@ test("reload discovers new Rules without revising already activated messages", a
 	const harness = createHarness(homeDir);
 	registerPiRules(harness.api, { homeDir, platform: "darwin" });
 	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
 	writeFileSync(existingPath, "new body");
 	writeFileSync(join(rulesDir, "new.md"), "new Rule");
 	await dispatch(harness, "session_start", { type: "session_start", reason: "reload" });
 
-	assert.equal(harness.messages.length, 2);
+	assert.equal(harness.messages.length, 1);
 	assert.match(harness.messages[0].content, /old body/);
 	assert.doesNotMatch(harness.messages[0].content, /new body/);
+	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded .pi/agent/rules/new.md"]);
+	assert.match(harness.notifications.at(-1)?.message ?? "", /discovered 2, pending 1, rejected 0/);
+
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "continue" });
+	assert.equal(harness.messages.length, 2);
 	assert.match(harness.messages[1].content, /new Rule/);
-	assert.match(harness.notifications.at(-1)?.message ?? "", /discovered 2, activated 2, rejected 0/);
 
 	const renderer = harness.renderers.get("pi-rules") as any;
 	const component = renderer(harness.messages[1], { outputPad: 0 }, { fg: (_color: string, value: string) => value, bold: (value: string) => value });
@@ -482,9 +606,13 @@ test("keeps model globs provider-aware and case-sensitive", async () => {
 	const harness = createHarness(homeDir, { model: { provider: "openai", id: "gpt/5" } });
 	registerPiRules(harness.api, { homeDir, platform: "darwin" });
 	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
+	assert.equal(harness.messages.length, 0);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
 	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["double.md"]);
 
 	await dispatch(harness, "model_select", { model: { provider: "openai", id: "gpt-5" } });
+	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["double.md"]);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "continue" });
 	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["double.md", "single.md"]);
 });
 
@@ -520,5 +648,7 @@ test("reconsiders unconditional Rules for a fork session start", async () => {
 	harness.entries.splice(0, harness.entries.length);
 	await dispatch(harness, "session_start", { type: "session_start", reason: "fork" });
 
-	assert.equal(harness.messages.length, 2);
+	assert.equal(harness.messages.length, 0);
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "hello" });
+	assert.equal(harness.messages.length, 1);
 });

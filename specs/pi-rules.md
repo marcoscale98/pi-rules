@@ -12,9 +12,9 @@ The user needs a global, cross-platform Pi extension that preserves compatibilit
 
 Build a personal Pi extension that discovers Markdown Rules recursively from both Pi-native and Claude-compatible user and project locations. The extension will parse `paths`, `os`, and `models` frontmatter, resolve source precedence and collisions deterministically, and activate only the Rules whose declared conditions match.
 
-Rules without `paths` will activate when their OS and model conditions match. Path-scoped Rules will activate only after Pi successfully reads a matching file. Each activation will append a persistent custom message to the current session so the provider can reuse the existing prompt prefix. The TUI will reproduce Claude Code's visible `Loaded <relative-path>` feedback, while the model will receive the Rule body in a system-reminder wrapper containing the absolute Rule path.
+Rules without `paths` become provisional when their OS and model conditions match. Path-scoped Rules become provisional only after Pi successfully reads a matching file. Provisional Rules are kept in extension memory and shown in a non-persisted `Loaded <relative-path>` widget; they are not session entries or provider context. Immediately before the next provider call, matching provisional Rules are committed as persistent custom messages, and the model receives each Rule body in a system-reminder wrapper containing the absolute Rule path.
 
-Activation deduplication will be derived from the active session branch and limited to messages after the most recent compact boundary. Consequently, Rules remain cache-friendly before compaction, while path-scoped Rules can activate again after compaction if a matching file is read. Rules conditioned only by OS or model will be reconsidered immediately after compaction.
+Everything up to and including the last user or assistant message is frozen. Once a Rule is committed, it remains visible even if the model changes. Before commitment, activation conditions are re-evaluated on startup, resume, reload, model selection, compaction, tree navigation, and matching reads. Deduplication is derived from committed messages on the active session branch and limited to messages after the most recent compact boundary. Consequently, committed Rules remain cache-friendly before compaction, while path-scoped Rules can activate again after compaction if a matching file is read. Rules conditioned only by OS or model are reconsidered immediately after compaction.
 
 The first version will deliberately avoid file watching, content revision tracking, tombstones, a `/rules` command, shell detection, and hard enforcement.
 
@@ -46,12 +46,12 @@ The first version will deliberately avoid file watching, content revision tracki
 24. As a Pi user, I want path conditions evaluated using the OS and model selected at read time, so that activation is deterministic and requires no history of unmatched reads.
 25. As a Pi user, I want a model change not to retroactively activate path Rules, so that the implementation remains simple and stateless with respect to prior unmatched reads.
 26. As a Pi user, I want unconditional OS/model Rules reconsidered after a model change, so that instructions for the newly selected model can activate.
-27. As a Pi user, I want activated Rules to remain historically visible after a model change, so that appending new context preserves the prompt-cache prefix.
+27. As a Pi user, I want committed Rules to remain historically visible after a model change, so that appending new context preserves the prompt-cache prefix while uncommitted matches can be withdrawn.
 28. As a Pi user, I want simultaneous activations ordered deterministically, so that parallel reads do not create nondeterministic transcripts or cache keys.
 29. As a Pi user, I want each activated Rule displayed as `Loaded <path>`, so that activation feedback matches Claude Code.
 30. As a Pi user, I want displayed Rule paths relative to the current working directory, so that feedback is concise and familiar.
 31. As a model, I need the absolute Rule path and body in a system-reminder wrapper, so that provenance is explicit and behavior matches Claude Code's message shape.
-32. As a Pi user, I want activation messages persisted in the transcript, so that resume, fork, and prompt caching behave predictably.
+32. As a Pi user, I want committed activation messages persisted in the transcript, so that resume, fork, and prompt caching behave predictably without recording provisional matches.
 33. As a Pi user, I want deduplication derived from the active branch, so that forks and tree navigation respect where a Rule was activated.
 34. As a Pi user, I want deduplication limited to the current post-compaction epoch, so that a Rule omitted by compaction can activate again.
 35. As a Pi user, I want path Rules to reactivate only after another matching read following compaction, so that no history of previously read paths is required.
@@ -61,8 +61,8 @@ The first version will deliberately avoid file watching, content revision tracki
 39. As a Rules author, I want invalid frontmatter, invalid globs, empty condition lists, and empty bodies to fail closed, so that malformed Rules never become unconditional accidentally.
 40. As a Rules author, I want unknown frontmatter keys ignored, so that the same Markdown can coexist with other tools and future metadata.
 41. As a Pi user, I want invalid Rules reported as warnings, so that configuration mistakes are visible without crashing Pi.
-42. As a Pi user, I want a concise startup summary, so that I can see how many Rules were discovered, activated, or rejected.
-43. As a Pi user, I want the path shown whenever any Rule activates, including startup OS/model Rules, so that I know exactly which instructions entered the context.
+42. As a Pi user, I want a concise startup summary, so that I can see how many Rules were discovered, pending, or rejected.
+43. As a Pi user, I want the path shown whenever any Rule becomes pending or committed, including startup OS/model Rules, so that I know which instructions are awaiting or entering the context.
 44. As a Pi user, I want `/reload` to refresh discovery without diffing previously activated content, so that the first version stays simple.
 45. As a Pi user, I accept that an already activated Rule is not updated or revoked within the same compaction epoch, so that revision and tombstone machinery is unnecessary.
 46. As a Pi user, I want tests that use Node's built-in runner without a third-party test framework, so that the repository remains lightweight while also serving as an installable Pi package.
@@ -89,25 +89,26 @@ The first version will deliberately avoid file watching, content revision tracki
 - OS represents the host platform and available machine tools; it does not assert which shell Pi is using. Shell-specific conditions are not part of the first version.
 - Unknown frontmatter keys are ignored. Invalid YAML, invalid condition types, empty lists, invalid globs, or an empty effective body cause the Rule to be skipped with a warning.
 - YAML frontmatter and block-level HTML comments will not be included in the body sent to the model. Comments inside code blocks remain content.
-- Rules without `paths` activate when all OS/model conditions match. This evaluation occurs at session startup, resume, model selection, and after compaction as needed.
-- Rules with `paths` activate only after a successful built-in `read` result for a matching target. Failed or blocked reads, and other tools such as edit, write, grep, find, and bash, do not trigger activation.
-- Unmatched read paths will not be retained for later model changes. A path Rule that becomes model-compatible later requires another matching read.
-- Newly activated Rules from the same agent turn will be accumulated only until the turn ends, sorted by resolved precedence and relative identity, and appended in deterministic order.
-- Each Rule activation will produce one persistent custom message. Its model-visible content uses the same system-reminder structure as Claude Code: the absolute source path followed by the effective Rule body.
-- A custom TUI renderer will show `Loaded ` followed by the path relative to the current working directory, with the path emphasized in the same spirit as Claude Code.
-- Activation conditions are gates, not permanent visibility filters. Once appended within an epoch, a Rule remains visible even if the model changes.
-- Deduplication will inspect activation messages on the active branch only after the most recent compact boundary. No external database, read-history file, or independent persistent set will be introduced.
-- Following compaction, path Rules become eligible for reactivation on a new successful matching read. Applicable Rules without `paths` are appended again because they have no read trigger.
-- Resume, fork, and tree navigation derive activation state from the selected branch. Navigating before an activation makes the Rule eligible again.
-- Reload refreshes discovery for Rules that have not yet activated in the current epoch. It does not compare hashes, update already active bodies, append revisions, or append tombstones.
-- No `/rules` diagnostic command will be included in the first version. Startup summaries, activation lines, and warnings provide the initial observability surface.
+- Rules without `paths` become provisional when all OS/model conditions match. This evaluation occurs at session startup, resume, reload, model selection, matching reads, and after compaction as needed. A new evaluation replaces the provisional set, dropping Rules that no longer match.
+- Rules with `paths` become provisional only after a successful built-in `read` result for a matching target. Failed or blocked reads, and other tools such as edit, write, grep, find, and bash, do not trigger activation.
+- Unmatched read paths will not be retained for later model changes. A provisional path Rule whose OS/model conditions stop matching is dropped and requires another matching read to become provisional.
+- Provisional Rules are held in extension memory and shown in a widget above the editor as `Loaded <relative-path>` lines. The widget is cleared when the current provisional set is committed or becomes empty; it is never persisted or sent to the model.
+- Provisional Rules are committed only immediately before a provider call. A user prompt uses the `before_agent_start` injection point, which persists the Rule messages after the user message. During an agent run, queued steering messages remain the mid-run commit path before the next LLM call.
+- Newly committed Rules from the same provider call are sorted by resolved catalog order and relative identity, and each Rule produces one persistent custom message. Its model-visible content uses the same system-reminder structure as Claude Code: the absolute source path followed by the effective Rule body.
+- A custom TUI renderer will show `Loaded ` followed by the path relative to the current working directory for committed messages, with the path emphasized in the same spirit as Claude Code.
+- The session region up to and including the last user or assistant message is frozen. Once committed within an epoch, a Rule remains visible even if the model changes; only provisional matches may be withdrawn.
+- Deduplication will inspect committed activation messages on the active branch only after the most recent compact boundary. No external database, read-history file, or independent persistent set will be introduced.
+- Following compaction, path Rules become eligible for provisional activation on a new successful matching read. Applicable Rules without `paths` become provisional again because they have no read trigger. If compaction will retry an agent run, the provisional Rules are committed to the queued next call.
+- Resume, fork, and tree navigation derive committed activation state from the selected branch and re-evaluate provisional Rules. Navigating before a committed activation makes the Rule eligible again.
+- Reload refreshes discovery and re-evaluates provisional Rules that have not yet committed in the current epoch. It does not compare hashes, update already committed bodies, append revisions, or append tombstones.
+- No `/rules` diagnostic command will be included in the first version. Startup summaries, the pending widget, committed activation lines, and warnings provide the initial observability surface.
 - The extension will not enforce behavior. Rules remain model context; hard security policy belongs in hooks, tool interception, or other enforcement mechanisms.
 - Repository allowlisting will be updated explicitly for every added source, test, and specification file. Installed dependencies, generated files, and symlinks will remain untracked according to repository policy.
 
 ## Testing Decisions
 
 - Tests will assert externally visible extension behavior rather than private helper implementation. The preferred seam is one integration harness around the extension factory.
-- The harness will provide a temporary real filesystem and a fake Pi API/context capable of dispatching lifecycle, model, tool-result, turn-end, and compaction events.
+- The harness will provide a temporary real filesystem and a fake Pi API/context capable of dispatching lifecycle, model, tool-result, turn-end, compaction, and `before_agent_start` events, plus the provisional Rules widget calls.
 - The fake API will be declared with TypeScript's `satisfies ExtensionAPI`, not cast from an untyped object, so changes to Pi's extension contract fail typechecking.
 - Automated tests will use Node 26's built-in `node:test` runner and native TypeScript type stripping. The root package manifest will declare Pi package metadata, runtime dependencies, and the test script; no root TypeScript configuration or third-party test framework will be added.
 - The automated test command will be `node --test extensions/pi-rules/*.test.ts`.
@@ -121,7 +122,7 @@ The first version will deliberately avoid file watching, content revision tracki
 - Model tests will cover exact `provider/id` values, family globs, provider separation, case sensitivity, and nonmatching model changes.
 - Path activation tests will verify successful reads, failed reads, non-read tools, paths outside the matching base, normalized Windows separators, case-insensitive matching on every operating system, basename-at-any-depth patterns, direct-child patterns, terminal `/**` normalization, and parallel activation ordering.
 - Message tests will verify the absolute path and effective body in the model-visible wrapper and the relative path in `Loaded <path>` rendering.
-- Lifecycle tests will verify startup activation, model selection, persistent visibility after model changes, deduplication, resume, fork/tree branch behavior, compact-boundary epochs, immediate restoration of non-path Rules, and read-triggered restoration of path Rules.
+- Lifecycle tests will verify provisional startup activation, prompt-time commitment, model selection withdrawal and restoration, frozen visibility after committed messages, deduplication, resume, fork/tree branch behavior, compact-boundary epochs, immediate restoration of non-path Rules, and read-triggered restoration of path Rules.
 - Reload tests will verify catalog refresh for new Rules while confirming that active Rules are neither diffed nor revised.
 - Invalid configuration tests will verify fail-closed behavior and warning emission without crashing the session.
 - Prior art includes Pi's bundled Claude Rules example for extension lifecycle integration and the inspected Claude Code implementation for successful-read triggers, nested-memory message shape, and `Loaded <path>` rendering.
@@ -147,6 +148,6 @@ The first version will deliberately avoid file watching, content revision tracki
 ## Further Notes
 
 - Claude Code 2.1.206 was empirically verified to load a `.claude/rules/` file containing unknown `os` and `models` frontmatter keys. This demonstrates current interoperability but is not a documented compatibility guarantee. Regression checks against future Claude Code versions may be performed manually.
-- Claude Code's inspected implementation activates path-scoped Rules after successful reads, renders `Loaded <relative-path>`, and sends the absolute path and Rule contents in a system-reminder wrapper. Its external-user attachment persistence differs from this design: this extension intentionally persists activation messages for cache continuity and resume behavior.
-- The extension's compaction epoch design preserves the simplicity of transcript-derived state while avoiding permanent silent loss when a compact summary omits an activated Rule.
+- Claude Code's inspected implementation activates path-scoped Rules after successful reads, renders `Loaded <relative-path>`, and sends the absolute path and Rule contents in a system-reminder wrapper. Its external-user attachment persistence differs from this design: this extension commits provisional activation messages at the next provider call for cache continuity and resume behavior.
+- The extension's frozen/provisional model preserves the simplicity of transcript-derived state while avoiding irrelevant model-gated Rules entering a new provider context. Its compaction epoch design also avoids permanent silent loss when a compact summary omits a committed Rule.
 - Behavioral instructions may still be ignored by a model. Requirements that must be enforced should use Pi tool interception, hooks, sandboxing, or other deterministic controls.
