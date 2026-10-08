@@ -10,13 +10,13 @@ Pi Rules is a [Pi](https://github.com/badlogic/pi-mono) extension compatible wit
 
 ### Transparent loading at startup
 
-Pi Rules tells you exactly what it loaded and why. No guessing what context the model is carrying.
+Pi Rules shows matching Rules as pending before they enter the session. No guessing which instructions will be committed for the next model call.
 
 ![Pi startup screen showing the Pi Rules discovery summary and loaded Rule paths](resources/images/load-rules.png)
 
 ### Context that survives the session
 
-Activated Rules are saved as `system-reminder` messages, so they stay in scope through resumes, forks, and compactions—and remain visible in Pi's session tree.
+Committed Rules are saved as `system-reminder` messages, so they stay in scope through resumes, forks, and compactions—and remain visible in Pi's session tree. Rules shown as pending in the TUI are not part of the session or provider context until the next call.
 
 ![Pi session tree showing persisted pi-rules system-reminder messages](resources/images/pi-message-history.png)
 
@@ -58,7 +58,7 @@ os: macos
 Use Homebrew for package management.
 ```
 
-That's it. On macOS it loads. Everywhere else it doesn't.
+That's it. On macOS it becomes pending and is committed before the next provider call. Everywhere else it doesn't match.
 
 ## Where Rules live
 
@@ -90,11 +90,11 @@ Three conditions, three different jobs:
 
 | Condition | What it's for | When it activates |
 | --- | --- | --- |
-| `paths` | File-specific instructions (Claude Code compatible) | After Pi reads a matching file with its built-in `read` tool |
-| `os` | Computer environment context | On a matching OS (`macos`, `windows`, `linux`; `darwin`/`win32` are aliases; WSL counts as Linux) |
-| `models` | Model-specific guidance | When the active model matches a `provider/id` glob |
+| `paths` | File-specific instructions (Claude Code compatible) | Becomes pending after Pi reads a matching file with its built-in `read` tool |
+| `os` | Computer environment context | Becomes pending on a matching OS (`macos`, `windows`, `linux`; `darwin`/`win32` are aliases; WSL counts as Linux) |
+| `models` | Model-specific guidance | Becomes pending when the active model matches a `provider/id` glob |
 
-Each condition accepts a string or a list. Within a condition: OR. Across conditions: AND. Rules without `paths` are evaluated at startup, on resume, on model switch, on reload, and after compaction.
+Each condition accepts a string or a list. Within a condition: OR. Across conditions: AND. Rules without `paths` are re-evaluated at startup, on resume, on model switch, on reload, and after compaction. Matching Rules remain provisional while the model is idle; the pending `Loaded <path>` widget updates as conditions change and clears when Rules are committed before a provider call.
 
 ### `os` — tell the agent about its environment
 
@@ -134,7 +134,7 @@ A model like `openai/gpt-5.6-sol` that doesn't need this guidance simply won't m
 - Recursive discovery with deterministic precedence and collision handling.
 - Path matching with `.gitignore` semantics, case-insensitive, with bounded brace expansion.
 - OS support: macOS, Windows, Linux, Android, BSD variants, AIX, SunOS.
-- Deduplication across branches and compactions—no external database needed.
+- Provisional activation until the next provider call, with committed Rules deduplicated across branches and compactions—no external database needed.
 - Fails closed: a malformed Rule warns instead of becoming unconditional.
 
 Rules are advisory. They become model context, not security enforcement.
