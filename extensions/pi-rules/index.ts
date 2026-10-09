@@ -48,9 +48,12 @@ function messageContent(rule: Rule): string {
 	return `<system-reminder>\nContents of ${rule.absolutePath}:\n\n${rule.body}\n</system-reminder>`;
 }
 
-function relativeMessagePath(details: unknown): string {
-	if (!details || typeof details !== "object" || !("relativePath" in details)) return "";
-	return typeof details.relativePath === "string" ? details.relativePath : "";
+function messageRules(details: unknown): Array<{ identity: string; relativePath?: unknown }> {
+	if (!details || typeof details !== "object") return [];
+	const rules = "rules" in details && Array.isArray(details.rules) ? details.rules : [details];
+	return rules.filter((rule): rule is { identity: string; relativePath?: unknown } =>
+		rule && typeof rule === "object" && typeof rule.identity === "string",
+	);
 }
 
 function rendererFor(
@@ -58,13 +61,11 @@ function rendererFor(
 	options: MessageRenderOptions,
 	theme: Theme,
 ): { render(width: number): string[]; invalidate(): void } {
-	const relativePath = relativeMessagePath(message.details);
-	const text = `Loaded ${relativePath}`;
+	const lines = messageRules(message.details).map(({ relativePath }) => `Loaded ${typeof relativePath === "string" ? relativePath : ""}`);
 	return {
 		render(width: number): string[] {
 			const available = Math.max(0, width - options.outputPad);
-			const visible = text.length > available ? text.slice(0, available) : text;
-			return [theme.fg("accent", theme.bold(visible))];
+			return lines.map((text) => theme.fg("accent", theme.bold(text.slice(0, available))));
 		},
 		invalidate() {},
 	};
@@ -113,10 +114,7 @@ export default function registerPiRules(pi: ExtensionAPI, options: PiRulesOption
 		const identities = new Set<string>();
 		for (const entry of branch.slice(boundary + 1)) {
 			if (entry.type !== "custom_message" || entry.customType !== CUSTOM_MESSAGE_TYPE) continue;
-			const details = entry.details;
-			if (details && typeof details === "object" && "identity" in details && typeof details.identity === "string") {
-				identities.add(details.identity);
-			}
+			for (const rule of messageRules(entry.details)) identities.add(rule.identity);
 		}
 		for (const identity of pendingMessages) {
 			if (identities.has(identity)) pendingMessages.delete(identity);
@@ -135,13 +133,6 @@ export default function registerPiRules(pi: ExtensionAPI, options: PiRulesOption
 				relativePath: relativeDisplayPath(ctx.cwd, rule.absolutePath),
 			},
 		};
-	}
-
-	function appendRule(rule: Rule, ctx: ExtensionContext, identities: Set<string>): boolean {
-		if (identities.has(rule.identity) || pendingMessages.has(rule.identity)) return false;
-		pi.sendMessage(ruleMessage(rule, ctx), ctx.isIdle() ? { triggerTurn: false } : { deliverAs: "steer" });
-		pendingMessages.add(rule.identity);
-		return true;
 	}
 
 	function contextFor(ctx: ExtensionContext, model = ctx.model, target?: string) {
@@ -189,11 +180,20 @@ export default function registerPiRules(pi: ExtensionAPI, options: PiRulesOption
 			if (byCatalog !== 0) return byCatalog;
 			return left.identity < right.identity ? -1 : left.identity > right.identity ? 1 : 0;
 		});
-		let activated = 0;
-		for (const rule of candidates) {
-			if (appendRule(rule, ctx, identities)) activated++;
-		}
-		return activated;
+		const messages = candidates
+			.filter((rule) => !identities.has(rule.identity) && !pendingMessages.has(rule.identity))
+			.map((rule) => ruleMessage(rule, ctx));
+		if (messages.length === 0) return 0;
+		// Pi's default steering queue delivers one message per call: keep this activation atomic.
+		const message = messages.length === 1 ? messages[0] : {
+			customType: CUSTOM_MESSAGE_TYPE,
+			content: messages.map((message) => message.content).join("\n\n"),
+			display: true,
+			details: { rules: messages.map((message) => message.details) },
+		};
+		pi.sendMessage<typeof message.details>(message, ctx.isIdle() ? { triggerTurn: false } : { deliverAs: "steer" });
+		for (const message of messages) pendingMessages.add(message.details.identity);
+		return messages.length;
 	}
 
 	async function promptRules(ctx: ExtensionContext): Promise<Rule[]> {
