@@ -71,7 +71,7 @@ The first version will deliberately avoid file watching, content revision tracki
 
 ## Implementation Decisions
 
-- The feature will be implemented as an installable Git Pi package using the conventional root `extensions/` directory and a package manifest that declares its entrypoint and runtime dependencies.
+- The feature will be implemented as an installable Git Pi package using the conventional root `extensions/` directory and a package manifest that declares its entrypoint and runtime dependencies. Pi compatibility and the development dependency will both be declared as `<2.0.0`.
 - The extension will be separated into an entrypoint, rule discovery/loading logic, condition matching logic, and tests. This separation exists to keep filesystem concerns distinct from pure matching behavior without introducing speculative abstractions.
 - User-level discovery will include the Pi user Rules directory and Claude's user Rules directory.
 - Project discovery will walk from the current working directory toward the filesystem root and inspect both Pi-native and Claude-compatible Rules directories at every level.
@@ -109,7 +109,7 @@ The first version will deliberately avoid file watching, content revision tracki
 
 - Tests will assert externally visible extension behavior rather than private helper implementation. The preferred seam is one integration harness around the extension factory.
 - The harness will provide a temporary real filesystem and a fake Pi API/context capable of dispatching lifecycle, model, tool-result, turn-end, compaction, and `before_agent_start` events, plus the provisional Rules widget calls.
-- The harness will model Pi's default one-at-a-time steering delivery and keep custom-message queues separate from `ctx.hasPendingMessages()`, which only counts queued user text. An additional offline SDK regression with Pi 0.82.1's faux provider will verify that an extension-started turn receives multiple matching Rules in catalog order on its first provider call without an extra turn.
+- The harness will model Pi's default one-at-a-time steering delivery and keep custom-message queues separate from `ctx.hasPendingMessages()`, which only counts queued user text. An additional offline SDK regression using the faux provider of the installed Pi version (< 2.0.0) will verify that an extension-started turn receives multiple matching Rules in catalog order on its first provider call without an extra turn.
 - The fake API will be declared with TypeScript's `satisfies ExtensionAPI`, not cast from an untyped object, so changes to Pi's extension contract fail typechecking.
 - Automated tests will use Node 26's built-in `node:test` runner and native TypeScript type stripping. The root package manifest will declare Pi package metadata, runtime dependencies, and the test script; no root TypeScript configuration or third-party test framework will be added.
 - The automated test command will be `node --test extensions/pi-rules/*.test.ts`.

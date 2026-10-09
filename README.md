@@ -24,7 +24,7 @@ Committed Rules are saved as `system-reminder` messages, so they stay in scope t
 
 ### Install
 
-**Requirements:** Pi with Node.js 22.19 or newer, Git, and npm.
+**Requirements:** Pi < 2.0.0, Node.js 22.19 or newer, Git, and npm.
 
 ```sh
 pi install https://github.com/marcoscale98/pi-rules
