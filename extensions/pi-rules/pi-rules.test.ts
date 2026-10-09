@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerPiRules from "./index.ts";
 
 interface HandlerMap {
@@ -48,7 +50,7 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 		},
 		isProjectTrusted: () => options.trusted ?? false,
 		isIdle: () => !streaming,
-		hasPendingMessages: () => pendingMessages || steeringMessages.length > 0 || nextTurnMessages.length > 0,
+		hasPendingMessages: () => pendingMessages,
 		sessionManager,
 	};
 
@@ -111,13 +113,14 @@ function createHarness(cwd: string, options: { trusted?: boolean; model?: any; c
 		widgets,
 		sendOptions,
 		nextTurnMessages,
+		steeringMessages,
 		triggeredTurns,
 		confirmations,
 		handlers,
 		setStreaming(value: boolean) { streaming = value; },
 		setPendingMessages(value: boolean) { pendingMessages = value; },
 		deliverSteering() {
-			while (steeringMessages.length > 0) deliverMessage(steeringMessages.shift());
+			if (steeringMessages.length > 0) deliverMessage(steeringMessages.shift());
 		},
 	};
 }
@@ -166,25 +169,91 @@ test("loads and activates an unconditional user Rule at session startup", async 
 	assert.equal(harness.widgets.get("pi-rules"), undefined);
 });
 
-test("commits pending Rules before the first provider call of an extension-started turn", async () => {
+test("commits all pending Rules before the first provider call of an extension-started turn", async () => {
 	const homeDir = mkdtempSync(join(tmpdir(), "pi-rules-home-"));
 	const rulesDir = join(homeDir, ".pi", "agent", "rules");
 	mkdirSync(rulesDir, { recursive: true });
-	writeFileSync(join(rulesDir, "always.md"), "---\nmodels: openai/gpt-*\n---\nAlways use the project conventions.");
+	writeFileSync(join(rulesDir, "always.md"), "Always use the project conventions.");
+	writeFileSync(join(rulesDir, "model.md"), "---\nmodels: openai/gpt-*\n---\nUse model guidance.");
 
 	const harness = createHarness(homeDir, { model: { provider: "openai", id: "gpt-5" } });
 	registerPiRules(harness.api, { homeDir, platform: "darwin" });
 	await dispatch(harness, "session_start", { type: "session_start", reason: "startup" });
-	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded .pi/agent/rules/always.md"]);
+	assert.deepEqual(harness.widgets.get("pi-rules"), ["Loaded .pi/agent/rules/always.md", "Loaded .pi/agent/rules/model.md"]);
 
 	await dispatch(harness, "agent_start", { type: "agent_start" });
 	assert.equal(harness.messages.length, 0);
 	harness.deliverSteering();
 
-	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["always.md"]);
-	assert.deepEqual(harness.sendOptions, [{ deliverAs: "steer" }]);
+	assert.match(harness.messages.map((message) => message.content).join("\n"), /Always use the project conventions\.[\s\S]*Use model guidance\./);
+	assert.equal(harness.steeringMessages.length, 0, "Rules must not remain queued for an extra model turn");
 	assert.equal(harness.triggeredTurns.length, 0);
 	assert.equal(harness.widgets.get("pi-rules"), undefined);
+	const renderer = harness.renderers.get("pi-rules") as any;
+	assert.deepEqual(renderer(harness.messages[0], { outputPad: 0 }, {
+		fg: (_color: string, value: string) => value, bold: (value: string) => value,
+	}).render(80), ["Loaded .pi/agent/rules/always.md", "Loaded .pi/agent/rules/model.md"]);
+
+	harness.setStreaming(false);
+	await dispatch(harness, "session_start", { type: "session_start", reason: "resume" });
+	await dispatch(harness, "before_agent_start", { type: "before_agent_start", prompt: "continue" });
+	assert.equal(harness.messages.length, 1, "Resumed batches deduplicate every committed Rule");
+});
+
+test("real Pi delivers all pending Rules in one provider call for an extension-started turn", { timeout: 15_000 }, async () => {
+	// Resolve Pi's own installed AI dependency rather than adding a second copy.
+	const searchPaths = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent")).resolve.paths("@earendil-works/pi-ai") ?? [];
+	const fauxPath = searchPaths.map((path) => join(path, "@earendil-works/pi-ai/dist/providers/faux.js")).find(existsSync);
+	assert.ok(fauxPath, "Pi's AI dependency must be installed");
+	const { fauxProvider, fauxAssistantMessage } = await import(pathToFileURL(fauxPath).href);
+	const homeDir = mkdtempSync(join(tmpdir(), "pi-rules-sdk-"));
+	const agentDir = join(homeDir, ".pi", "agent");
+	const rulesDir = join(agentDir, "rules");
+	mkdirSync(rulesDir, { recursive: true });
+	writeFileSync(join(rulesDir, "always.md"), "Always use the project conventions.");
+	writeFileSync(join(rulesDir, "faux.md"), "---\nmodels: faux/model-a\n---\nUse model guidance.");
+	const faux = fauxProvider({ models: [{ id: "model-a" }], tokensPerSecond: Infinity });
+	const contexts: string[] = [];
+	faux.setResponses([(context: any) => {
+		contexts.push(JSON.stringify(context.messages));
+		return fauxAssistantMessage("Done.");
+	}, fauxAssistantMessage("Unexpected extra turn.")]);
+	const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null });
+	modelRuntime.registerNativeProvider(faux.provider);
+	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const errors: unknown[] = [];
+	const resourceLoader = new DefaultResourceLoader({
+		cwd: homeDir, agentDir, settingsManager,
+		noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+		agentsFilesOverride: () => ({ agentsFiles: [] }),
+		extensionFactories: [
+			(pi) => registerPiRules(pi, { homeDir }),
+			(pi) => pi.registerCommand("kickoff", {
+				description: "Start a turn without user prompt submission",
+				handler: async () => { pi.sendMessage({ customType: "kickoff", content: "Begin.", display: true }, { triggerTurn: true }); },
+			}),
+		],
+	});
+	await resourceLoader.reload();
+	const { session } = await createAgentSession({
+		cwd: homeDir, agentDir, modelRuntime, model: faux.getModel(),
+		resourceLoader, settingsManager, sessionManager: SessionManager.inMemory(homeDir), tools: [],
+	});
+	try {
+		await session.bindExtensions({ onError: (error) => errors.push(error) });
+		assert.equal(session.messages.filter((message) => message.role === "custom").length, 0);
+		await session.prompt("/kickoff");
+		await session.agent.waitForIdle();
+		assert.deepEqual(errors, []);
+		assert.equal(faux.state.callCount, 1, "Pending Rules must not cause an extra provider call");
+		assert.match(contexts[0], /Always use the project conventions\.[\s\S]*Use model guidance\./);
+		const committed = session.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === "pi-rules");
+		assert.equal(committed.length, 1);
+		assert.ok(committed[0].type === "custom_message");
+		assert.match(String(committed[0].content), /Always use the project conventions\.[\s\S]*Use model guidance\./);
+	} finally {
+		session.dispose();
+	}
 });
 
 test("commits restored Rules before a queued continuation after threshold compaction", async () => {
@@ -192,6 +261,7 @@ test("commits restored Rules before a queued continuation after threshold compac
 	const rulesDir = join(homeDir, ".pi", "agent", "rules");
 	mkdirSync(rulesDir, { recursive: true });
 	writeFileSync(join(rulesDir, "always.md"), "Always use the project conventions.");
+	writeFileSync(join(rulesDir, "model.md"), "---\nmodels: openai/gpt-*\n---\nUse model guidance.");
 
 	const harness = createHarness(homeDir);
 	registerPiRules(harness.api, { homeDir, platform: "darwin" });
@@ -202,7 +272,8 @@ test("commits restored Rules before a queued continuation after threshold compac
 
 	assert.equal(harness.messages.length, 0);
 	harness.deliverSteering();
-	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["always.md"]);
+	assert.match(harness.messages[0].content, /Always use the project conventions\.[\s\S]*Use model guidance\./);
+	assert.equal(harness.steeringMessages.length, 0);
 	assert.deepEqual(harness.sendOptions, [{ deliverAs: "steer" }]);
 });
 
@@ -405,7 +476,7 @@ test("matches ignore path semantics across separators, depth, terminal directori
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: "docs\\nested\\guide.md" }, isError: false });
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: outside }, isError: false });
 	await dispatch(harness, "turn_end", { type: "turn_end" });
-	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["a-basename.md", "b-direct.md", "c-terminal.md"]);
+	assert.deepEqual(harness.messages.flatMap((message) => (message.details.rules ?? [message.details]).map((rule: any) => rule.identity)), ["a-basename.md", "b-direct.md", "c-terminal.md"]);
 
 	const windowsHarness = createHarness(cwd, { trusted: true });
 	registerPiRules(windowsHarness.api, { homeDir, platform: "darwin" });
@@ -540,7 +611,8 @@ test("classifies WSL as Linux and orders parallel path activations deterministic
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: "src/file.ts" }, isError: false });
 	await dispatch(harness, "tool_result", { type: "tool_result", toolName: "read", input: { path: "other.ts" }, isError: false });
 	await dispatch(harness, "turn_end", { type: "turn_end" });
-	assert.deepEqual(harness.messages.map((message) => message.details.identity), ["a.md", "b.md"]);
+	assert.deepEqual(harness.messages.flatMap((message) => (message.details.rules ?? [message.details]).map((rule: any) => rule.identity)), ["a.md", "b.md"]);
+	assert.equal(harness.steeringMessages.length, 0);
 });
 
 test("reload discovers new Rules without revising already activated messages", async () => {

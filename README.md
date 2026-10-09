@@ -137,6 +137,8 @@ A model like `openai/gpt-5.6-sol` that doesn't need this guidance simply won't m
 - Provisional activation until the next provider call, with committed Rules deduplicated across branches and compactions—no external database needed.
 - Fails closed: a malformed Rule warns instead of becoming unconditional.
 
+Rules committed together during an agent run are delivered as one ordered batch, so they reach the same provider call even with Pi's default one-at-a-time message queue. Each Rule still has its own `Loaded <path>` line and is deduplicated independently. Existing saved sessions remain compatible.
+
 Rules are advisory. They become model context, not security enforcement.
 
 ## More information
@@ -155,7 +157,7 @@ pi --no-extensions --approve -e "$(pwd)/extensions/pi-rules/index.ts"
 
 `--no-extensions` disables auto-discovered extensions; `--approve` trusts project-local Rules for that run.
 
-Run the test suite:
+Run the test suite (includes an offline Pi SDK regression using its faux provider; no remote model calls):
 
 ```sh
 npm install
